@@ -2,7 +2,7 @@
 // @name         linuxdo保活
 // @namespace    http://tampermonkey.net/
 // @version      0.2.4
-// @description  linuxdo自动浏览帖子，自动点赞（优化版：适配linux.do，增强稳定性与兼容性；开关图标置于右上角，提升流畅性；优化浏览速度模拟人工阅读；修复精简版bug）
+// @description  linuxdo自动浏览帖子，提升流畅性；优化浏览速度模拟人工阅读
 // @author       zhcf1ess (optimized by Grok)
 // @match        https://linux.do/*
 // @grant        GM_setValue
