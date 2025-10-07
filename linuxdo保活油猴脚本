@@ -1,0 +1,362 @@
+// ==UserScript==
+// @name         linuxdo保活
+// @namespace    http://tampermonkey.net/
+// @version      0.2.4
+// @description  linuxdo自动浏览帖子，自动点赞（优化版：适配linux.do，增强稳定性与兼容性；开关图标置于右上角，提升流畅性；优化浏览速度模拟人工阅读；修复精简版bug）
+// @author       zhcf1ess (optimized by Grok)
+// @match        https://linux.do/*
+// @grant        GM_setValue
+// @grant        GM_getValue
+// @license      MIT
+// @icon         https://linux.do/uploads/default/original/3X/9/d/9dd49731091ce8656e94433a26a3ef36062b3994.png
+// @namespace    https://github.com/zhsama/linuxdo
+// @supportURL   https://github.com/zhsama/linuxdo
+// @homepageURL  https://github.com/zhsama/linuxdo
+// @noframes
+// @downloadURL  https://update.greasyfork.org/scripts/524017/linuxdo%E4%BF%9D%E6%B4%BB.user.js
+// @updateURL    https://update.greasyfork.org/scripts/524017/linuxdo%E4%BF%9D%E6%B4%BB.meta.js
+// ==/UserScript==
+
+(function () {
+    'use strict';
+
+    // 配置对象（精简）
+    const config = {
+        scrollInterval: 1000, // 滚动间隔(毫秒)，缩短以加速
+        scrollStep: 600, // 每次滚动的像素，调整为更自然
+        viewCountThreshold: 500, // 浏览量阈值
+        scrollDuration: 20, // 滚动持续时间（秒），缩短模拟快速阅读
+        maxTopics: 100, // 总浏览帖子数量
+        maxRunTime: 30, // 总运行时间（分钟）
+        minWaitTime: 1500, // 帖子间最小等待时间（毫秒），缩短
+        maxWaitTime: 5000, // 帖子间最大等待时间（毫秒），缩短
+        useIframe: true,
+        urls: {
+            base: 'https://linux.do',
+            new: 'https://linux.do/new',
+            connect: 'https://connect.linux.do'
+        },
+        iframe: {
+            width: '325px',
+            height: '500px',
+            top: '64px',
+            left: '1px',
+            position: 'fixed',
+            zIndex: '9999'
+        },
+        switchIcon: {
+            top: '10px',
+            right: '10px',
+            size: '40px',
+            background: '#6c757d',
+            activeBackground: '#28a745'
+        },
+        logging: {
+            enabled: true,
+            level: { error: true, info: true, debug: false }
+        },
+        statsPanel: { enabled: true }
+    };
+
+    // 日志工具（精简）
+    const log = (level, ...args) => config.logging.enabled && config.logging.level[level] && console[level](...args);
+
+    // 统计对象（精简）
+    const stats = { totalViews: 0, totalLikes: 0, sessionViews: 0, sessionLikes: 0, startTime: Date.now() };
+
+    // 加载/保存统计（合并）
+    const loadSaveStats = (load = true) => {
+        const key = 'linuxdoStats';
+        if (load) {
+            const saved = GM_getValue(key, {});
+            stats.totalViews = saved.totalViews || 0;
+            stats.totalLikes = saved.totalLikes || 0;
+            log('info', '📊 加载统计：', stats.totalViews, '浏览，', stats.totalLikes, '点赞');
+        } else {
+            GM_setValue(key, { totalViews: stats.totalViews, totalLikes: stats.totalLikes });
+        }
+    };
+
+    // 更新统计
+    const updateStats = (type) => {
+        if (type === 'view') { stats.sessionViews++; stats.totalViews++; }
+        else if (type === 'like') { stats.sessionLikes++; stats.totalLikes++; }
+        loadSaveStats(false);
+        updateStatsPanel();
+    };
+
+    // 打印统计
+    const printStats = () => {
+        const runTime = Math.floor((Date.now() - stats.startTime) / 1000);
+        const timeStr = `${Math.floor(runTime / 60)}分${runTime % 60}秒`;
+        log('info', '\n📊 统计：', timeStr, '| 本次浏览:', stats.sessionViews, '| 本次点赞:', stats.sessionLikes, '| 总浏览:', stats.totalViews, '| 总点赞:', stats.totalLikes, '\n');
+    };
+
+    // 统计面板（精简）
+    let statsPanel = null;
+    const updateStatsPanel = () => {
+        if (!config.statsPanel.enabled || !statsPanel) return;
+        const runTime = Math.floor((Date.now() - stats.startTime) / 1000);
+        const timeStr = `${Math.floor(runTime / 60)}分${runTime % 60}秒`;
+        statsPanel.innerHTML = `<strong>📊 统计</strong><br>🕒 ${timeStr}<br>👀 本次浏览：${stats.sessionViews}<br>❤️ 本次点赞：${stats.sessionLikes}<br>📈 总浏览：${stats.totalViews}<br>💖 总点赞：${stats.totalLikes}<br><span style="color:red;" id="error-msg"></span>`;
+    };
+    const createStatsPanel = () => {
+        if (!config.statsPanel.enabled || statsPanel) return;
+        statsPanel = document.createElement('div');
+        statsPanel.style.cssText = 'position:fixed;top:120px;left:10px;z-index:9998;background:#fff;border:1px solid #ccc;padding:10px;border-radius:5px;box-shadow:0 2px 5px rgba(0,0,0,0.2);font-size:12px;width:200px;';
+        document.body.appendChild(statsPanel);
+        updateStatsPanel();
+    };
+    const setErrorMsg = (msg) => {
+        if (!statsPanel) return;
+        let errorSpan = statsPanel.querySelector('#error-msg');
+        if (!errorSpan) {
+            errorSpan = document.createElement('span');
+            errorSpan.id = 'error-msg';
+            errorSpan.style.color = 'red';
+            statsPanel.appendChild(errorSpan);
+        }
+        errorSpan.textContent = msg;
+    };
+
+    // 开关状态
+    const getSwitchState = () => GM_getValue('linuxdoHelperEnabled', false);
+    const toggleSwitch = () => {
+        const state = !getSwitchState();
+        GM_setValue('linuxdoHelperEnabled', state);
+        if (state) window.location.href = config.urls.base;
+        else if (statsPanel) { document.body.removeChild(statsPanel); statsPanel = null; }
+        log('info', `Linuxdo助手已${state ? '启用' : '禁用'}`);
+        updateSwitchIcon();
+    };
+
+    // 开关图标（精简，固定右上角）
+    let switchIcon = null;
+    const createSwitchIcon = () => {
+        if (switchIcon) return;
+        const container = document.createElement('div');
+        container.id = 'linuxdo-switch-container';
+        container.style.cssText = `position:fixed;top:${config.switchIcon.top};right:${config.switchIcon.right};z-index:10000;pointer-events:none;`;
+        document.body.appendChild(container);
+
+        switchIcon = document.createElement('button');
+        switchIcon.id = 'linuxdo-switch-icon';
+        switchIcon.style.cssText = `width:${config.switchIcon.size};height:${config.switchIcon.size};border:none;border-radius:50%;cursor:pointer;pointer-events:all;background-color:${config.switchIcon.background};color:white;box-shadow:0 2px 5px rgba(0,0,0,0.2);transition:background-color 0.3s ease;`;
+        switchIcon.title = getSwitchState() ? '停止Linuxdo助手' : '启动Linuxdo助手';
+        switchIcon.tabIndex = 0;
+
+        const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+        svg.setAttribute('viewBox', '0 0 24 24');
+        svg.setAttribute('width', '24');
+        svg.setAttribute('height', '24');
+        svg.style.cssText = 'fill:currentColor;';
+
+        const use = document.createElementNS('http://www.w3.org/2000/svg', 'use');
+        use.setAttribute('href', getSwitchState() ? '#pause' : '#play');
+        svg.appendChild(use);
+        switchIcon.appendChild(svg);
+        container.appendChild(switchIcon);
+
+        switchIcon.addEventListener('click', toggleSwitch);
+        updateSwitchIcon();
+        log('info', '开关图标创建于右上角');
+    };
+    const updateSwitchIcon = () => {
+        if (!switchIcon) return;
+        const state = getSwitchState();
+        const use = switchIcon.querySelector('use');
+        if (use) use.setAttribute('href', state ? '#pause' : '#play');
+        switchIcon.title = state ? '停止Linuxdo助手' : '启动Linuxdo助手';
+        switchIcon.style.backgroundColor = state ? config.switchIcon.activeBackground : config.switchIcon.background;
+    };
+
+    // CAPTCHA检查（精简选择器）
+    const checkForCaptcha = (targetWindow) => {
+        const captcha = targetWindow.document.querySelector('[id*="captcha"],[class*="captcha"],[data-captcha],iframe[src*="captcha"]');
+        if (captcha) {
+            log('error', '检测到 CAPTCHA，暂停！');
+            setErrorMsg('检测到 CAPTCHA，请手动处理');
+            return true;
+        }
+        return false;
+    };
+
+    // 点赞（精简，增强兼容）
+    const checkAndLike = async (targetWindow = window) => {
+        try {
+            if (checkForCaptcha(targetWindow)) return false;
+            const viewsElement = targetWindow.document.querySelector('.num.views .number, [data-view-count], [class*="views"] .number, .topic-views');
+            if (!viewsElement) return log('info', '未找到浏览量，跳过点赞'), false;
+            let viewCount = parseInt((viewsElement.getAttribute('title') || viewsElement.textContent || viewsElement.innerText || '').replace(/[^0-9]/g, '')) || 0;
+            if (viewCount <= config.viewCountThreshold) return false;
+
+            const likeButton = targetWindow.document.querySelector('button.toggle-like, button.btn-toggle-reaction-like, button[aria-label*="like"], button[data-action="like"], .reaction-like');
+            if (!likeButton) return log('info', '未找到点赞按钮'), false;
+
+            const isLiked = likeButton.getAttribute('aria-pressed') === 'true' || likeButton.classList.contains('active') || likeButton.title?.includes('删除此 heart 回应') || likeButton.innerHTML.includes('heart');
+            if (isLiked) return log('info', '已点赞，跳过'), false;
+
+            likeButton.focus();
+            likeButton.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+            await new Promise(r => setTimeout(r, 300));
+            log('info', '点赞成功');
+            updateStats('like');
+            return true;
+        } catch (e) {
+            log('error', '点赞失败:', e);
+            setErrorMsg('点赞失败');
+            return false;
+        }
+    };
+
+    // 获取帖子列表（精简，使用requestAnimationFrame）
+    const getTopicsList = async () => {
+        return new Promise(resolve => {
+            let attempts = 0, maxAttempts = 10;
+            const check = () => {
+                const topics = document.querySelectorAll('.topic-list .link-top-line a.title, #list-area .title, .topic-title a');
+                if (topics.length > 0) {
+                    const list = [];
+                    log('info', `找到 ${topics.length} 帖子`);
+                    topics.forEach(topic => {
+                        const parent = topic.closest('tr, .topic-row, .topic-list-item');
+                        if (!parent) return;
+                        if (parent.querySelector('.topic-statuses .pinned, [class*="pinned"]')) return log('debug', `跳过置顶：${topic.textContent.trim()}`);
+                        const viewsEl = parent.querySelector('.num.views .number, [class*="views"]');
+                        const views = parseInt((viewsEl?.getAttribute('title') || viewsEl?.textContent || '').replace(/[^0-9]/g, '')) || 0;
+                        list.push({ title: topic.textContent.trim(), url: topic.href, views });
+                    });
+                    resolve(list);
+                    return;
+                }
+                if (++attempts < maxAttempts) requestAnimationFrame(check);
+                else resolve([]), log('info', '帖子加载超时');
+            };
+            check();
+        });
+    };
+
+    // 浏览帖子（修复滚动bug：使用setInterval模拟人工，移除无效await）
+    const browseTopic = async (topic) => {
+        log('info', `浏览：${topic.title}`);
+        updateStats('view');
+
+        if (config.useIframe) {
+            const iframe = document.createElement('iframe');
+            Object.assign(iframe.style, config.iframe);
+            iframe.sandbox = 'allow-scripts allow-same-origin';
+            iframe.src = `${topic.url}?_t=${Date.now()}`;
+            document.body.appendChild(iframe);
+
+            await new Promise(resolve => {
+                const timeout = setTimeout(() => { if (iframe.parentNode) iframe.parentNode.removeChild(iframe); resolve(); }, 8000);
+                iframe.onload = () => {
+                    clearTimeout(timeout);
+                    const win = iframe.contentWindow;
+                    if (win && !checkForCaptcha(win)) checkAndLike(win);
+                    resolve();
+                };
+            });
+
+            // 模拟人工滚动：使用setInterval，随机步长/方向，随机暂停
+            await new Promise(resolve => {
+                const start = Date.now();
+                let intervalId;
+                let pauseTimeout = null;
+                const scroll = () => {
+                    const elapsed = Date.now() - start;
+                    if (elapsed >= config.scrollDuration * 1000) {
+                        clearInterval(intervalId);
+                        if (pauseTimeout) clearTimeout(pauseTimeout);
+                        if (iframe.parentNode) iframe.parentNode.removeChild(iframe);
+                        printStats();
+                        resolve();
+                        return;
+                    }
+                    try {
+                        const win = iframe.contentWindow;
+                        if (win) {
+                            // 随机步长和方向模拟自然
+                            const step = (Math.random() > 0.7 ? -config.scrollStep / 2 : config.scrollStep) * (0.8 + Math.random() * 0.4);
+                            win.scrollBy(0, step);
+                            // 随机暂停模拟阅读（使用setTimeout）
+                            if (Math.random() > 0.8) {
+                                pauseTimeout = setTimeout(() => {}, 500 + Math.random() * 1000);
+                            }
+                        }
+                    } catch (e) { log('debug', '滚动失败:', e); }
+                };
+                intervalId = setInterval(scroll, config.scrollInterval);
+            });
+
+            await new Promise(r => setTimeout(r, 800));
+        } else {
+            const origUrl = window.location.href;
+            window.location.href = topic.url;
+            await new Promise(r => setTimeout(r, config.scrollDuration * 1000 + 1500));
+            await checkAndLike(window);
+            window.location.href = origUrl;
+            await new Promise(r => setTimeout(r, 1500));
+        }
+    };
+
+    // 检查停止
+    const shouldStopScript = () => {
+        if (stats.sessionViews >= config.maxTopics) return log('info', `🛑 达到 ${config.maxTopics} 帖，停止`), true;
+        const runTime = (Date.now() - stats.startTime) / 1000 / 60;
+        if (runTime >= config.maxRunTime) return log('info', `🛑 达到 ${config.maxRunTime} 分，停止`), true;
+        return false;
+    };
+
+    // 停止脚本
+    const stopScript = () => {
+        GM_setValue('linuxdoHelperEnabled', false);
+        printStats();
+        log('info', '✨ 脚本停止');
+        if (statsPanel) { document.body.removeChild(statsPanel); statsPanel = null; }
+        updateSwitchIcon();
+        window.location.href = config.urls.connect;
+    };
+
+    // 主要浏览
+    const browseTopics = async () => {
+        try {
+            const topics = await getTopicsList();
+            if (topics.length === 0) return log('info', '无帖子'), setErrorMsg('未找到帖子');
+            const shuffled = topics.sort(() => Math.random() - 0.5);
+            for (const topic of shuffled) {
+                if (shouldStopScript()) return stopScript();
+                if (!getSwitchState()) return log('info', '手动停止');
+                await browseTopic(topic);
+                const wait = config.minWaitTime + Math.random() * (config.maxWaitTime - config.minWaitTime);
+                await new Promise(r => setTimeout(r, wait));
+            }
+        } catch (e) {
+            log('error', '浏览出错:', e);
+            setErrorMsg('浏览出错');
+        }
+    };
+
+    // 主函数
+    const main = async () => {
+        log('info', '⚠️ 使用可能违反服务条款，请谨慎！');
+        createSwitchIcon();
+        if (!getSwitchState()) return;
+
+        loadSaveStats(true);
+        createStatsPanel();
+        updateStatsPanel(); // 确保初始更新
+
+        if (window.location.href.includes(config.urls.base) || window.location.href.includes(config.urls.new)) {
+            if (shouldStopScript()) stopScript();
+            else await browseTopics();
+        }
+    };
+
+    // 执行（精简监听）
+    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', main);
+    else setTimeout(main, 100); // 轻微延迟确保DOM就绪
+
+    // 变化监听（精简）
+    new MutationObserver(() => { if (getSwitchState() && !switchIcon) createSwitchIcon(); }).observe(document.body, { childList: true, subtree: true });
+})();
